@@ -85,8 +85,8 @@ class UserProfileAdmin(admin.ModelAdmin):
 
 # AdminSite restringido por rol (solo Super Administrador)
 class RoleRestrictedAdminSite(AdminSite):
-    site_header = 'Administración GlobeTrek'
-    site_title = 'Admin GlobeTrek'
+    site_header = 'Administración'
+    site_title = 'Admin'
     index_title = 'Panel de Administración'
 
     def has_permission(self, request):
@@ -94,6 +94,32 @@ class RoleRestrictedAdminSite(AdminSite):
         if not user.is_authenticated or not user.is_active:
             return False
         return True
+
+    def each_context(self, request):
+        ctx = super().each_context(request)
+        try:
+            from webconfig.models import WebSettings
+            company = ''
+            tenant = None
+            try:
+                profile = getattr(request.user, 'profile', None)
+                tenant = getattr(profile, 'tenant', None)
+            except Exception:
+                tenant = None
+            ws = None
+            if tenant:
+                ws = WebSettings.objects.filter(tenant=tenant).first()
+            if ws is None:
+                ws = WebSettings.objects.first()
+            company = (ws and getattr(ws, 'company_name', '') or '').strip()
+            if company:
+                self.site_header = f'Administración {company}'
+                self.site_title = f'Admin {company}'
+                ctx['site_header'] = self.site_header
+                ctx['site_title'] = self.site_title
+        except Exception:
+            pass
+        return ctx
 
 
 # Instancia del admin restringido

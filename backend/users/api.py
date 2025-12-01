@@ -163,8 +163,8 @@ class UsersView(APIView):
             return Response({'detail': 'Usuario y contraseña son requeridos.'}, status=status.HTTP_400_BAD_REQUEST)
         # Validar permisos según rol del solicitante
         if requester_role == 'super_admin':
-            if target_role not in ('admin', 'employer'):
-                return Response({'detail': 'Super Administrador solo puede crear usuarios de tipo Administrador o Empleador.'}, status=status.HTTP_403_FORBIDDEN)
+            if target_role not in ('admin', 'employer', 'employee'):
+                return Response({'detail': 'Super Administrador solo puede crear usuarios de tipo Administrador, Empleador o Empleado.'}, status=status.HTTP_403_FORBIDDEN)
         elif requester_role == 'admin':
             if target_role != 'employee':
                 return Response({'detail': 'Administrador solo puede crear usuarios de tipo Empleado.'}, status=status.HTTP_403_FORBIDDEN)
@@ -178,9 +178,38 @@ class UsersView(APIView):
         user.email = email or ''
         user.save()
         if target_role == 'employee':
-            # Vincular al tenant del administrador
-            ensure_tenant_for_user(request.user)
-            admin_tenant = _get_user_tenant(request.user)
+            # Si el solicitante es super_admin, debe especificar admin_id para asignar tenant
+            admin_tenant = None
+            if requester_role == 'super_admin':
+                tenant_id = request.data.get('tenant_id')
+                admin_id = request.data.get('admin_id')
+                if tenant_id:
+                    from .models import Tenant as TenantModel
+                    admin_tenant = TenantModel.objects.filter(id=tenant_id).first()
+                    if not admin_tenant:
+                        return Response({'detail': 'Tenant destino no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+                else:
+                    if not admin_id:
+                        return Response({'detail': 'tenant_id o admin_id es requerido para crear un empleado como Super Administrador.'}, status=status.HTTP_400_BAD_REQUEST)
+                    admin_user = User.objects.filter(id=admin_id).first()
+                    if not admin_user:
+                        return Response({'detail': 'Administrador destino no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+                    # Asegurar que el usuario destino sea admin/employer
+                    try:
+                        role_admin = _get_user_role(admin_user)
+                    except Exception:
+                        role_admin = 'employee'
+                    if role_admin not in ('admin', 'employer'):
+                        return Response({'detail': 'El usuario destino no es un administrador/empleador.'}, status=status.HTTP_400_BAD_REQUEST)
+                    # Asegurar tenant del admin destino
+                    ensure_tenant_for_user(admin_user)
+                    admin_tenant = _get_user_tenant(admin_user)
+            else:
+                # Vincular al tenant del administrador solicitante
+                ensure_tenant_for_user(request.user)
+                admin_tenant = _get_user_tenant(request.user)
+            if not admin_tenant:
+                return Response({'detail': 'No hay tenant válido para asignar el empleado.'}, status=status.HTTP_400_BAD_REQUEST)
             UserProfile.objects.create(
                 user=user,
                 role='employee',

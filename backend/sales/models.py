@@ -1,7 +1,7 @@
 from django.db import models
 from users.models import Tenant
 from clients.models import Client
-from products.models import Product, ProductColor
+from products.models import Product, ProductColor, ProductVariant
 
 
 class Sale(models.Model):
@@ -24,6 +24,7 @@ class SaleItem(models.Model):
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='items')
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     color = models.ForeignKey(ProductColor, null=True, blank=True, on_delete=models.PROTECT)
+    variant = models.ForeignKey(ProductVariant, null=True, blank=True, on_delete=models.PROTECT)
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     line_total = models.DecimalField(max_digits=12, decimal_places=2)

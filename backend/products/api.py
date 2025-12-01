@@ -7,7 +7,7 @@ from users.models import UserProfile, Tenant
 from .models import Category
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Q, Sum
-from .models import ProductColor, ProductColorImage
+from .models import ProductColor, ProductColorImage, ProductVariant, ProductFeature
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -90,6 +90,27 @@ class ProductSerializer(serializers.ModelSerializer):
         except Exception:
             colors_data = []
         data['colors'] = colors_data
+        try:
+            variants_data = []
+            for v in ProductVariant.objects.filter(product=instance).order_by('position', 'id'):
+                variants_data.append({
+                    'id': v.id,
+                    'name': v.name,
+                    'extra_price': str(v.extra_price),
+                })
+        except Exception:
+            variants_data = []
+        data['variants'] = variants_data
+        try:
+            features_data = []
+            for f in ProductFeature.objects.filter(product=instance).order_by('position', 'id'):
+                features_data.append({
+                    'id': f.id,
+                    'name': f.name,
+                })
+        except Exception:
+            features_data = []
+        data['features'] = features_data
         return data
 
     def validate(self, attrs):
@@ -406,4 +427,134 @@ class ProductColorImageDetailView(RetrieveUpdateDestroyAPIView):
         else:
             if _get_user_role(self.request.user) != 'super_admin':
                 qs = ProductColorImage.objects.none()
+        return qs
+
+
+class ProductVariantSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductVariant
+        fields = ['id', 'product', 'name', 'extra_price', 'position', 'created_at']
+        read_only_fields = ['product', 'created_at']
+
+    def validate_name(self, value):
+        if not value or len(value) > 50:
+            raise serializers.ValidationError('Nombre requerido, máximo 50 caracteres.')
+        return value
+
+    def validate_extra_price(self, value):
+        if value is None or value < 0:
+            raise serializers.ValidationError('Sobrecosto debe ser 0 o positivo.')
+        q = value.as_tuple().exponent
+        if q < -2:
+            raise serializers.ValidationError('Sobrecosto máximo 2 decimales.')
+        return value
+
+
+class ProductVariantListCreateView(ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductVariantSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        product_id = self.kwargs.get('product_id')
+        qs = ProductVariant.objects.filter(product_id=product_id).order_by('position', 'id')
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            return ProductVariant.objects.none()
+        tenant = _get_user_tenant(self.request.user)
+        if tenant and product.tenant != tenant:
+            return ProductVariant.objects.none()
+        if not tenant and _get_user_role(self.request.user) != 'super_admin':
+            return ProductVariant.objects.none()
+        return qs
+
+    def perform_create(self, serializer):
+        product_id = self.kwargs.get('product_id')
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Producto no encontrado')
+        tenant = _get_user_tenant(self.request.user)
+        if tenant and product.tenant != tenant:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('No puede modificar variantes de otro tenant.')
+        serializer.save(product=product)
+
+
+class ProductVariantDetailView(RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductVariantSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        qs = ProductVariant.objects.all()
+        tenant = _get_user_tenant(self.request.user)
+        if tenant:
+            qs = qs.filter(product__tenant=tenant)
+        else:
+            if _get_user_role(self.request.user) != 'super_admin':
+                qs = ProductVariant.objects.none()
+        return qs
+
+
+class ProductFeatureSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductFeature
+        fields = ['id', 'product', 'name', 'position', 'created_at']
+        read_only_fields = ['product', 'created_at']
+
+    def validate_name(self, value):
+        if not value or len(value) > 100:
+            raise serializers.ValidationError('Nombre requerido, máximo 100 caracteres.')
+        return value
+
+
+class ProductFeatureListCreateView(ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductFeatureSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        product_id = self.kwargs.get('product_id')
+        qs = ProductFeature.objects.filter(product_id=product_id).order_by('position', 'id')
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            return ProductFeature.objects.none()
+        tenant = _get_user_tenant(self.request.user)
+        if tenant and product.tenant != tenant:
+            return ProductFeature.objects.none()
+        if not tenant and _get_user_role(self.request.user) != 'super_admin':
+            return ProductFeature.objects.none()
+        return qs
+
+    def perform_create(self, serializer):
+        product_id = self.kwargs.get('product_id')
+        try:
+            product = Product.objects.get(id=product_id)
+        except Product.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Producto no encontrado')
+        tenant = _get_user_tenant(self.request.user)
+        if tenant and product.tenant != tenant:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('No puede modificar características de otro tenant.')
+        serializer.save(product=product)
+
+
+class ProductFeatureDetailView(RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProductFeatureSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        qs = ProductFeature.objects.all()
+        tenant = _get_user_tenant(self.request.user)
+        if tenant:
+            qs = qs.filter(product__tenant=tenant)
+        else:
+            if _get_user_role(self.request.user) != 'super_admin':
+                qs = ProductFeature.objects.none()
         return qs

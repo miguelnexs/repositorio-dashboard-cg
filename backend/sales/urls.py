@@ -1,5 +1,5 @@
 from django.urls import path
-from .api import SaleView, SalesListView, SalesStatsView, SalesNotificationCountView, SalesNotificationMarkReadView
+from .api import SaleView, SalesListView, SalesStatsView, SalesNotificationCountView, SalesNotificationMarkReadView, SalesStatusUpdateView
 
 urlpatterns = [
     path('', SaleView.as_view(), name='sales_create'),
@@ -7,4 +7,5 @@ urlpatterns = [
     path('stats/', SalesStatsView.as_view(), name='sales_stats'),
     path('notifications/count/', SalesNotificationCountView.as_view(), name='sales_notifications_count'),
     path('notifications/read/', SalesNotificationMarkReadView.as_view(), name='sales_notifications_read'),
+    path('status/<int:pk>/', SalesStatusUpdateView.as_view(), name='sales_status_update'),
 ]

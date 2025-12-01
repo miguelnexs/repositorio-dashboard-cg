@@ -1,14 +1,40 @@
 from rest_framework import serializers, generics, views, status, permissions
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from .models import WebSettings, PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, AccessLog, VisibleCategory
 from django.db import models
 from products.api import ProductSerializer
-from products.models import Product, Category, ProductColor
+from products.models import Product, Category, ProductColor, ProductVariant
 from sales.models import Sale, SaleItem
 from clients.models import Client
 from decimal import Decimal
 import datetime, random, string
 from django.db import transaction
+from urllib.parse import urlparse
+
+def _site_variants(site: str):
+    try:
+        s = (site or '').strip()
+        if not s:
+            return []
+        base = s[:-1] if s.endswith('/') else s
+        variants = {base, base + '/'}
+        parsed = urlparse(base)
+        if parsed.scheme and parsed.netloc:
+            host = parsed.hostname or ''
+            port = parsed.port
+            other = None
+            if host == 'localhost':
+                other = '127.0.0.1'
+            elif host == '127.0.0.1':
+                other = 'localhost'
+            if other:
+                netloc = other if port is None else f"{other}:{port}"
+                alt = f"{parsed.scheme}://{netloc}"
+                variants.update({alt, alt + '/'})
+        return list(variants)
+    except Exception:
+        return [site]
 
 
 class WebSettingsSerializer(serializers.ModelSerializer):
@@ -43,6 +69,7 @@ class StatsSerializer(serializers.Serializer):
 
 class WebSettingsView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     def get(self, request):
         
         # Seleccionar configuración específica del tenant del usuario
@@ -207,9 +234,12 @@ class PublicPortalView(views.APIView):
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
+        tenants = []
         if site:
-            ws = WebSettings.objects.filter(site_url=site).first()
-            tenant = ws and ws.tenant or None
+            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
+            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
+            if tenants:
+                tenant = tenants[0]
         if tenant is None and aid:
             try:
                 from users.models import Tenant
@@ -221,7 +251,14 @@ class PublicPortalView(views.APIView):
             tenant = ws.tenant
         vis_ids = list(VisibleProduct.objects.filter(active=True).order_by('position', 'product_id').values_list('product_id', flat=True))
         base_qs = Product.objects.filter(id__in=vis_ids)
-        prods = base_qs.filter(tenant=tenant) if tenant else base_qs
+        if tenants:
+            prods = base_qs.filter(tenant__in=tenants)
+            if not prods.exists():
+                prods = Product.objects.filter(tenant__in=tenants, active=True)
+        else:
+            prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
+            if tenant and not prods.exists():
+                prods = Product.objects.filter(tenant=tenant, active=True)
         settings = WebSettings.objects.first() or WebSettings.objects.create()
         policy = Policy.objects.first() or Policy.objects.create()
         return Response({
@@ -238,9 +275,12 @@ class PublicProductsView(views.APIView):
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
+        tenants = []
         if site:
-            ws = WebSettings.objects.filter(site_url=site).first()
-            tenant = ws and ws.tenant or None
+            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
+            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
+            if tenants:
+                tenant = tenants[0]
         if tenant is None and aid:
             try:
                 from users.models import Tenant
@@ -252,7 +292,14 @@ class PublicProductsView(views.APIView):
             tenant = ws.tenant
         vis_ids = list(VisibleProduct.objects.filter(active=True).order_by('position', 'product_id').values_list('product_id', flat=True))
         base_qs = Product.objects.filter(id__in=vis_ids)
-        prods = base_qs.filter(tenant=tenant) if tenant else base_qs
+        if tenants:
+            prods = base_qs.filter(tenant__in=tenants)
+            if not prods.exists():
+                prods = Product.objects.filter(tenant__in=tenants, active=True)
+        else:
+            prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
+            if tenant and not prods.exists():
+                prods = Product.objects.filter(tenant=tenant, active=True)
         return Response(ProductSerializer(prods, many=True, context={'request': request}).data)
 
 
@@ -281,7 +328,7 @@ class PublicSettingsView(views.APIView):
         if ws is None:
             ws = WebSettings.objects.first() or WebSettings.objects.create()
         if not ws.site_url:
-            ws.site_url = 'http://192.168.1.56:8080/'
+            ws.site_url = 'http://localhost:8080/'
             ws.save(update_fields=['site_url'])
         return Response(WebSettingsSerializer(ws).data)
 
@@ -377,6 +424,7 @@ class PublicCheckoutView(views.APIView):
                     pid = it.get('product_id')
                     qty = int(it.get('quantity') or 0)
                     color_id = it.get('color_id')
+                    variant_id = it.get('variant_id')
                     if not pid or qty <= 0:
                         raise ValueError('Item inválido')
                     product = Product.objects.filter(id=pid).first()
@@ -385,6 +433,7 @@ class PublicCheckoutView(views.APIView):
                     if tenant and getattr(product, 'tenant_id', None) != getattr(tenant, 'id', None):
                         raise ValueError('Producto no pertenece a la tienda')
                     price = Decimal(str(product.price))
+                    variant = None
                     # Stock handling
                     if color_id:
                         color = ProductColor.objects.filter(id=color_id, product=product).first()
@@ -399,7 +448,15 @@ class PublicCheckoutView(views.APIView):
                             raise ValueError('Stock insuficiente')
                         product.inventory_qty -= qty
                         product.save(update_fields=['inventory_qty'])
-                    SaleItem.objects.create(sale=sale, product=product, quantity=qty, unit_price=price, line_total=(price * qty), color=color if color_id else None)
+                    if variant_id:
+                        variant = ProductVariant.objects.filter(id=variant_id, product=product).first()
+                        if not variant:
+                            raise ValueError('Variante inválida')
+                        try:
+                            price = price + Decimal(str(variant.extra_price))
+                        except Exception:
+                            pass
+                    SaleItem.objects.create(sale=sale, product=product, quantity=qty, unit_price=price, line_total=(price * qty), color=color if color_id else None, variant=variant)
                     total_amount += (price * qty)
                 sale.total_amount = total_amount
                 sale.save(update_fields=['total_amount'])
@@ -451,9 +508,12 @@ class PublicCategoriesView(views.APIView):
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
+        tenants = []
         if site:
-            ws = WebSettings.objects.filter(site_url=site).first()
-            tenant = ws and ws.tenant or None
+            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
+            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
+            if tenants:
+                tenant = tenants[0]
         if tenant is None and aid:
             try:
                 from users.models import Tenant
@@ -465,7 +525,14 @@ class PublicCategoriesView(views.APIView):
             tenant = ws.tenant
         vis_ids = list(VisibleCategory.objects.filter(active=True).order_by('position', 'category_id').values_list('category_id', flat=True))
         base_qs = Category.objects.filter(id__in=vis_ids)
-        cats = base_qs.filter(tenant=tenant) if tenant else base_qs
+        if tenants:
+            cats = base_qs.filter(tenant__in=tenants)
+            if not cats.exists():
+                cats = Category.objects.filter(tenant__in=tenants, active=True)
+        else:
+            cats = base_qs.filter(tenant=tenant) if tenant else Category.objects.none()
+            if tenant and not cats.exists():
+                cats = Category.objects.filter(tenant=tenant, active=True)
         return Response([{
             'id': c.id,
             'name': c.name,

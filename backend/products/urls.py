@@ -10,4 +10,8 @@ urlpatterns = [
     path('colors/<int:pk>/', api_views.ProductColorDetailView.as_view(), name='product_colors_detail'),
     path('colors/<int:color_id>/images/', api_views.ProductColorImageListCreateView.as_view(), name='product_color_images_list_create'),
     path('color-images/<int:pk>/', api_views.ProductColorImageDetailView.as_view(), name='product_color_images_detail'),
+    path('<int:product_id>/variants/', api_views.ProductVariantListCreateView.as_view(), name='product_variants_list_create'),
+    path('variants/<int:pk>/', api_views.ProductVariantDetailView.as_view(), name='product_variants_detail'),
+    path('<int:product_id>/features/', api_views.ProductFeatureListCreateView.as_view(), name='product_features_list_create'),
+    path('features/<int:pk>/', api_views.ProductFeatureDetailView.as_view(), name='product_features_detail'),
 ]

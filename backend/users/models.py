@@ -3,6 +3,9 @@ from django.contrib.auth.models import User
 from django.core.validators import RegexValidator
 from .utils.crypto import encrypt_text, is_encrypted_text
 
+# Import tenant configuration models
+from .models_tenant_config import TenantConfiguration, TenantTheme, TenantPermission
+
 # Definición de roles
 ROLE_CHOICES = (
     ('super_admin', 'Super Administrador'),

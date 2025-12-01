@@ -84,6 +84,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'users.tenant.TenantMiddleware',
+    'users.middleware_domain.TenantDomainMiddleware',
 ]
 
 ROOT_URLCONF = 'globetrek_backend.urls'

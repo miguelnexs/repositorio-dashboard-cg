@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import JSONParser
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView
@@ -12,7 +13,7 @@ import random
 from django.db.models import Sum, Count
 from users.models import UserProfile, Tenant
 from clients.models import Client
-from products.models import Product, ProductColor
+from products.models import Product, ProductColor, ProductVariant
 from .models import Sale, SaleItem, OrderNotification
 
 
@@ -27,6 +28,7 @@ def _get_user_tenant(user):
 class SaleItemInputSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
     color_id = serializers.IntegerField(required=False, allow_null=True)
+    variant_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1)
 
 
@@ -88,6 +90,7 @@ class SaleView(APIView):
             if qty <= 0:
                 return Response({'detail': 'Cantidad inválida'}, status=400)
             unit_price = Decimal(str(product.price))
+            variant = None
             color = None
             if it.get('color_id'):
                 color = ProductColor.objects.filter(id=it['color_id'], product=product).first()
@@ -98,12 +101,21 @@ class SaleView(APIView):
             else:
                 if (product.inventory_qty or 0) < qty:
                     return Response({'detail': 'Stock insuficiente del producto'}, status=400)
+            if it.get('variant_id'):
+                variant = ProductVariant.objects.filter(id=it['variant_id'], product=product).first()
+                if not variant:
+                    return Response({'detail': 'Variante inválida'}, status=400)
+                try:
+                    unit_price = unit_price + Decimal(str(variant.extra_price))
+                except Exception:
+                    pass
 
             line_total = unit_price * qty
             SaleItem.objects.create(
                 sale=sale,
                 product=product,
                 color=color,
+                variant=variant,
                 quantity=qty,
                 unit_price=unit_price,
                 line_total=line_total,
@@ -121,10 +133,12 @@ class SaleView(APIView):
         sale.save(update_fields=['total_amount'])
 
         items_out = []
-        for si in sale.items.select_related('product', 'color'):
+        for si in sale.items.select_related('product', 'color', 'variant'):
             items_out.append({
                 'product': si.product.name,
                 'color': si.color.name if si.color else None,
+                'variant': si.variant.name if si.variant else None,
+                'variant_extra': (str(si.variant.extra_price) if si.variant else None),
                 'quantity': si.quantity,
                 'unit_price': str(si.unit_price),
                 'line_total': str(si.line_total),
@@ -153,6 +167,9 @@ class SalesListView(ListAPIView):
         qs = Sale.objects.all().select_related('client')
         if tenant:
             qs = qs.filter(tenant=tenant)
+        status = self.request.query_params.get('status')
+        if status in dict(Sale.STATUS_CHOICES):
+            qs = qs.filter(status=status)
         return qs.order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
@@ -171,9 +188,10 @@ class SalesListView(ListAPIView):
             return path
         def serialize(sale):
             items_out = []
-            for si in sale.items.select_related('product', 'color', 'product__category').all():
+            for si in sale.items.select_related('product', 'color', 'variant', 'product__category').all():
                 p = si.product
                 c = si.color
+                v = si.variant
                 items_out.append({
                     'product': {
                         'id': p.id,
@@ -189,6 +207,11 @@ class SalesListView(ListAPIView):
                         'name': c.name,
                         'hex': c.hex,
                     } if c else None),
+                    'variant': ({
+                        'id': v.id,
+                        'name': v.name,
+                        'extra_price': str(v.extra_price),
+                    } if v else None),
                     'quantity': si.quantity,
                     'unit_price': str(si.unit_price),
                     'line_total': str(si.line_total),
@@ -223,12 +246,42 @@ class SalesStatsView(APIView):
         total_amount = qs.aggregate(s=Sum('total_amount')).get('s') or Decimal('0.00')
         today_sales = qs.filter(created_at__gte=day_start).count()
         month_sales = qs.filter(created_at__gte=month_start).count()
+        status_counts = {
+            'pending': qs.filter(status='pending').count(),
+            'shipped': qs.filter(status='shipped').count(),
+            'delivered': qs.filter(status='delivered').count(),
+            'canceled': qs.filter(status='canceled').count(),
+        }
         return Response({
             'total_sales': total_sales,
             'total_amount': str(total_amount),
             'today_sales': today_sales,
             'month_sales': month_sales,
+            'status_counts': status_counts,
         })
+
+
+class SalesStatusUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser]
+
+    def patch(self, request, pk):
+        sale = Sale.objects.filter(id=pk).first()
+        if not sale:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Pedido no encontrado')
+        tenant = _get_user_tenant(request.user)
+        if tenant and sale.tenant != tenant:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('No puede modificar pedidos de otro tenant.')
+        new_status = (request.data or {}).get('status')
+        valid = dict(Sale.STATUS_CHOICES)
+        if new_status not in valid:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'status': 'Estado inválido. Use pending, shipped, delivered, canceled.'})
+        sale.status = new_status
+        sale.save(update_fields=['status'])
+        return Response({'id': sale.id, 'status': sale.status})
 
 
 class SalesNotificationCountView(APIView):
