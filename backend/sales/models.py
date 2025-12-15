@@ -22,12 +22,14 @@ class Sale(models.Model):
 
 class SaleItem(models.Model):
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='items')
-    product = models.ForeignKey(Product, on_delete=models.PROTECT)
-    color = models.ForeignKey(ProductColor, null=True, blank=True, on_delete=models.PROTECT)
-    variant = models.ForeignKey(ProductVariant, null=True, blank=True, on_delete=models.PROTECT)
+    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, blank=True)
+    color = models.ForeignKey(ProductColor, null=True, blank=True, on_delete=models.SET_NULL)
+    variant = models.ForeignKey(ProductVariant, null=True, blank=True, on_delete=models.SET_NULL)
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=12, decimal_places=2)
     line_total = models.DecimalField(max_digits=12, decimal_places=2)
+    product_name = models.CharField(max_length=120, blank=True, default='')
+    product_sku = models.CharField(max_length=64, blank=True, default='')
 
 
 class OrderNotification(models.Model):

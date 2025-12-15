@@ -54,11 +54,12 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'config.apps.ConfigConfig',
     'users',
     'products',
     'clients',
     'sales',
-    'webconfig',
+    'webconfig.apps.WebconfigConfig',
 ]
 
 # Configuración de autenticación
@@ -150,7 +151,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = 'es'
 
 TIME_ZONE = 'UTC'
 

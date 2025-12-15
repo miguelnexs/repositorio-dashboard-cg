@@ -1,23 +1,18 @@
 from django.db import models
+import os
+from django.utils.text import slugify
 from users.models import Tenant
 
 
-class WebSettings(models.Model):
-    primary_color = models.CharField(max_length=7, default='#0ea5e9')
-    secondary_color = models.CharField(max_length=7, default='#1f2937')
-    font_family = models.CharField(max_length=80, default='Inter, system-ui, sans-serif')
-    logo = models.ImageField(upload_to='web/logo/', null=True, blank=True)
-    currencies = models.CharField(max_length=64, default='COP')
-    site_url = models.URLField(blank=True, default='http://localhost:8080/')
-    tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
-    updated_at = models.DateTimeField(auto_now=True)
-    company_name = models.CharField(max_length=120, blank=True, default='')
-    company_nit = models.CharField(max_length=40, blank=True, default='')
-    company_phone = models.CharField(max_length=30, blank=True, default='')
-    company_whatsapp = models.CharField(max_length=30, blank=True, default='')
-    company_email = models.EmailField(blank=True, default='')
-    company_address = models.CharField(max_length=200, blank=True, default='')
-    company_description = models.TextField(blank=True, default='')
+def web_logo_upload_path(instance, filename):
+    try:
+        base, ext = os.path.splitext(filename)
+        safe = slugify(base) or 'logo'
+        tenant_id = getattr(instance, 'tenant_id', None)
+        folder = f"tenant_{tenant_id}" if tenant_id else "tenant_public"
+        return f"web/logo/{folder}/{safe}{ext.lower()}"
+    except Exception:
+        return f"web/logo/{filename}"
 
 
 class PaymentMethod(models.Model):
@@ -33,7 +28,7 @@ class PaymentMethod(models.Model):
 
 class Banner(models.Model):
     title = models.CharField(max_length=100, blank=True)
-    image = models.ImageField(upload_to='web/banners/')
+    image = models.ImageField(upload_to='web/banners/', null=True, blank=True)
     link = models.URLField(blank=True)
     active = models.BooleanField(default=True)
     position = models.PositiveIntegerField(default=0)
@@ -43,6 +38,7 @@ class Banner(models.Model):
 class Policy(models.Model):
     shipping_text = models.TextField(blank=True)
     returns_text = models.TextField(blank=True)
+    privacy_text = models.TextField(blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
 
@@ -72,3 +68,12 @@ class VisibleCategory(models.Model):
     active = models.BooleanField(default=True)
     position = models.PositiveIntegerField(default=0)
     updated_at = models.DateTimeField(auto_now=True)
+
+
+class UserURL(models.Model):
+    user = models.ForeignKey('auth.User', on_delete=models.CASCADE)
+    url = models.URLField(max_length=256, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} -> {self.url}"

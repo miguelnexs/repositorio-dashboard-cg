@@ -119,6 +119,8 @@ class SaleView(APIView):
                 quantity=qty,
                 unit_price=unit_price,
                 line_total=line_total,
+                product_name=product.name or '',
+                product_sku=product.sku or '',
             )
             total += line_total
 
@@ -135,7 +137,7 @@ class SaleView(APIView):
         items_out = []
         for si in sale.items.select_related('product', 'color', 'variant'):
             items_out.append({
-                'product': si.product.name,
+                'product': si.product.name if si.product else si.product_name,
                 'color': si.color.name if si.color else None,
                 'variant': si.variant.name if si.variant else None,
                 'variant_extra': (str(si.variant.extra_price) if si.variant else None),
@@ -194,13 +196,13 @@ class SalesListView(ListAPIView):
                 v = si.variant
                 items_out.append({
                     'product': {
-                        'id': p.id,
-                        'name': p.name,
-                        'description': p.description,
-                        'sku': p.sku,
-                        'category_name': getattr(p.category, 'name', None),
-                        'image': abs_url(getattr(p, 'image', None) and p.image.url if getattr(p, 'image', None) else None),
-                        'active': p.active,
+                        'id': p.id if p else None,
+                        'name': (p.name if p else si.product_name),
+                        'description': (p.description if p else ''),
+                        'sku': (p.sku if p else si.product_sku),
+                        'category_name': (getattr(p.category, 'name', None) if p else None),
+                        'image': (abs_url(getattr(p, 'image', None) and p.image.url) if p and getattr(p, 'image', None) else None),
+                        'active': (p.active if p else False),
                     },
                     'color': ({
                         'id': c.id,

@@ -98,7 +98,7 @@ class RoleRestrictedAdminSite(AdminSite):
     def each_context(self, request):
         ctx = super().each_context(request)
         try:
-            from webconfig.models import WebSettings
+            from config.models import AppSettings
             company = ''
             tenant = None
             try:
@@ -108,9 +108,9 @@ class RoleRestrictedAdminSite(AdminSite):
                 tenant = None
             ws = None
             if tenant:
-                ws = WebSettings.objects.filter(tenant=tenant).first()
+                ws = AppSettings.objects.filter(tenant=tenant).first()
             if ws is None:
-                ws = WebSettings.objects.first()
+                ws = AppSettings.objects.first()
             company = (ws and getattr(ws, 'company_name', '') or '').strip()
             if company:
                 self.site_header = f'Administración {company}'

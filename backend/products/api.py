@@ -187,6 +187,13 @@ class ProductDetailView(RetrieveUpdateDestroyAPIView):
             return Product.objects.all()
         return Product.objects.none()
 
+    def perform_destroy(self, instance):
+        from rest_framework.exceptions import PermissionDenied
+        role = _get_user_role(self.request.user)
+        if role not in ('admin', 'super_admin'):
+            raise PermissionDenied('Solo administradores pueden eliminar productos.')
+        instance.delete()
+
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -244,7 +251,11 @@ class CategoryListCreateView(ListCreateAPIView):
             qs = qs.filter(tenant=tenant)
         else:
             role = _get_user_role(self.request.user)
-            if role != 'super_admin':
+            if role == 'super_admin':
+                qs = qs
+            elif role == 'admin':
+                qs = qs.filter(tenant__isnull=True)
+            else:
                 qs = Category.objects.none()
         search = self.request.query_params.get('search')
         if search:

@@ -1,7 +1,11 @@
 from rest_framework import serializers, generics, views, status, permissions
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
+import re
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
-from .models import WebSettings, PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, AccessLog, VisibleCategory
+from .models import PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, AccessLog, VisibleCategory, UserURL
+from config.models import AppSettings
 from django.db import models
 from products.api import ProductSerializer
 from products.models import Product, Category, ProductColor, ProductVariant
@@ -37,11 +41,12 @@ def _site_variants(site: str):
         return [site]
 
 
-class WebSettingsSerializer(serializers.ModelSerializer):
+class AppSettingsSerializer(serializers.ModelSerializer):
     class Meta:
-        model = WebSettings
-        fields = ['id', 'primary_color', 'secondary_color', 'font_family', 'logo', 'currencies', 'site_url', 'updated_at',
-                  'company_name','company_nit','company_phone','company_whatsapp','company_email','company_address','company_description']
+        model = AppSettings
+        fields = ['id', 'primary_color', 'secondary_color', 'font_family', 'logo', 'currencies', 'updated_at',
+                  'company_name','company_nit','company_phone','company_whatsapp','company_email','company_address','company_description',
+                  'printer_type','printer_name','paper_width_mm','auto_print','receipt_footer']
 
 
 class PaymentMethodSerializer(serializers.ModelSerializer):
@@ -59,7 +64,13 @@ class BannerSerializer(serializers.ModelSerializer):
 class PolicySerializer(serializers.ModelSerializer):
     class Meta:
         model = Policy
-        fields = ['id', 'shipping_text', 'returns_text', 'updated_at']
+        fields = ['id', 'shipping_text', 'returns_text', 'privacy_text', 'updated_at']
+
+
+class UserURLSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserURL
+        fields = ['id', 'url', 'created_at']
 
 
 class StatsSerializer(serializers.Serializer):
@@ -78,15 +89,18 @@ class WebSettingsView(views.APIView):
         except Exception:
             user_tenant = None
         if user_tenant:
-            ws = WebSettings.objects.filter(tenant=user_tenant).first()
+            ws = AppSettings.objects.filter(tenant=user_tenant).first()
             if not ws:
-                ws = WebSettings.objects.create(tenant=user_tenant)
+                ws = AppSettings.objects.create(tenant=user_tenant)
         else:
-            ws = WebSettings.objects.first() or WebSettings.objects.create()
-        if not ws.site_url:
-            ws.site_url = 'http://localhost:8080/'
-            ws.save(update_fields=['site_url'])
-        return Response(WebSettingsSerializer(ws).data)
+            ws = AppSettings.objects.first() or AppSettings.objects.create()
+        try:
+            if not ws.logo:
+                ws.logo.name = 'web/logo/logo_2.png'
+                ws.save(update_fields=['logo'])
+        except Exception:
+            pass
+        return Response(AppSettingsSerializer(ws).data)
 
     def put(self, request):
         
@@ -96,12 +110,18 @@ class WebSettingsView(views.APIView):
         except Exception:
             user_tenant = None
         if user_tenant:
-            ws = WebSettings.objects.filter(tenant=user_tenant).first()
+            ws = AppSettings.objects.filter(tenant=user_tenant).first()
             if not ws:
-                ws = WebSettings.objects.create(tenant=user_tenant)
+                ws = AppSettings.objects.create(tenant=user_tenant)
         else:
-            ws = WebSettings.objects.first() or WebSettings.objects.create()
-        serializer = WebSettingsSerializer(ws, data=request.data, partial=True)
+            ws = AppSettings.objects.first() or AppSettings.objects.create()
+        data = request.data.copy()
+        if 'receipt_footer' in data:
+            import re
+            t = str(data.get('receipt_footer') or '')
+            t = re.sub(r"<\s*script[\s\S]*?>[\s\S]*?<\s*/\s*script\s*>", "", t, flags=re.IGNORECASE)
+            data['receipt_footer'] = t
+        serializer = AppSettingsSerializer(ws, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
@@ -145,13 +165,53 @@ class BannerListCreateView(generics.ListCreateAPIView):
     queryset = Banner.objects.all().order_by('position', '-created_at')
     serializer_class = BannerSerializer
     permission_classes = [permissions.IsAuthenticated]
+    def perform_create(self, serializer):
+        obj = serializer.save()
+        # Enforce only one active banner
+        if obj.active:
+            Banner.objects.exclude(id=obj.id).update(active=False)
 
 
 class BannerDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Banner.objects.all()
     serializer_class = BannerSerializer
     permission_classes = [permissions.IsAuthenticated]
+    def perform_update(self, serializer):
+        obj = serializer.save()
+        if obj.active:
+            Banner.objects.exclude(id=obj.id).update(active=False)
 
+class PublicBannersView(views.APIView):
+    permission_classes = [permissions.AllowAny]
+    def get(self, request):
+        items = Banner.objects.filter(active=True).order_by('position', '-created_at')
+        def abs_image(b):
+            try:
+                url = b.image.url if b.image else None
+                if url and isinstance(url, str) and url.startswith('/'):
+                    return request.build_absolute_uri(url)
+                return url
+            except Exception:
+                return None
+        def resolve_image(b):
+            try:
+                if b.image:
+                    url = b.image.url
+                    if isinstance(url, str) and url.startswith('/'):
+                        return request.build_absolute_uri(url)
+                    return url
+                if b.link:
+                    return b.link
+            except Exception:
+                pass
+            return None
+        return Response([{
+            'id': b.id,
+            'title': b.title,
+            'image': resolve_image(b),
+            'position': b.position,
+            'created_at': b.created_at,
+        } for b in items])
 
 class PolicyView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -165,7 +225,20 @@ class PolicyView(views.APIView):
         pol = Policy.objects.first()
         if not pol:
             pol = Policy.objects.create()
-        serializer = PolicySerializer(pol, data=request.data, partial=True)
+        def sanitize(text):
+            try:
+                if text is None:
+                    return ''
+                t = str(text)
+                t = re.sub(r"<\s*script[\s\S]*?>[\s\S]*?<\s*/\s*script\s*>", "", t, flags=re.IGNORECASE)
+                return t
+            except Exception:
+                return ''
+        data = request.data.copy()
+        for k in ['shipping_text','returns_text','privacy_text']:
+            if k in data:
+                data[k] = sanitize(data.get(k))
+        serializer = PolicySerializer(pol, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
@@ -207,6 +280,17 @@ class VisibleProductUpdateView(views.APIView):
                 obj.position = int(position)
             except Exception:
                 pass
+        try:
+            user_tenant = getattr(request.user, 'profile', None) and request.user.profile.tenant or None
+        except Exception:
+            user_tenant = None
+        try:
+            product = Product.objects.filter(id=product_id).first()
+            if product and user_tenant and getattr(product, 'tenant', None) is None:
+                product.tenant = user_tenant
+                product.save(update_fields=['tenant'])
+        except Exception:
+            pass
         obj.save()
         return Response(VisibleProductSerializer(obj).data)
 class PortalView(views.APIView):
@@ -218,10 +302,10 @@ class PortalView(views.APIView):
             return Response({'detail': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
         vis_ids = list(VisibleProduct.objects.filter(active=True).values_list('product_id', flat=True))
         prods = Product.objects.filter(id__in=vis_ids)
-        settings = WebSettings.objects.first() or WebSettings.objects.create()
+        settings = AppSettings.objects.first() or AppSettings.objects.create()
         policy = Policy.objects.first() or Policy.objects.create()
         return Response({
-            'settings': WebSettingsSerializer(settings).data,
+            'settings': AppSettingsSerializer(settings).data,
             'policy': PolicySerializer(policy).data,
             'products': ProductSerializer(prods, many=True, context={'request': request}).data,
         })
@@ -236,33 +320,24 @@ class PublicPortalView(views.APIView):
         tenant = None
         tenants = []
         if site:
-            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
-            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
-            if tenants:
-                tenant = tenants[0]
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile') and getattr(uu.user.profile, 'tenant', None):
+                tenant = uu.user.profile.tenant
         if tenant is None and aid:
             try:
                 from users.models import Tenant
                 tenant = Tenant.objects.filter(admin_id=int(aid)).first()
             except Exception:
                 tenant = None
-        if tenant is None:
-            ws = WebSettings.objects.filter(site_url='http://localhost:8080/').first() or WebSettings.objects.first() or WebSettings.objects.create()
-            tenant = ws.tenant
         vis_ids = list(VisibleProduct.objects.filter(active=True).order_by('position', 'product_id').values_list('product_id', flat=True))
         base_qs = Product.objects.filter(id__in=vis_ids)
-        if tenants:
-            prods = base_qs.filter(tenant__in=tenants)
-            if not prods.exists():
-                prods = Product.objects.filter(tenant__in=tenants, active=True)
-        else:
-            prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
-            if tenant and not prods.exists():
-                prods = Product.objects.filter(tenant=tenant, active=True)
-        settings = WebSettings.objects.first() or WebSettings.objects.create()
+        prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
+        if tenant and not prods.exists():
+            prods = Product.objects.filter(tenant=tenant, active=True)
+        settings = AppSettings.objects.filter(tenant=tenant).first() if tenant else None
         policy = Policy.objects.first() or Policy.objects.create()
         return Response({
-            'settings': WebSettingsSerializer(settings).data,
+            'settings': (AppSettingsSerializer(settings).data if settings else {}),
             'policy': PolicySerializer(policy).data,
             'products': ProductSerializer(prods, many=True).data,
         })
@@ -275,36 +350,55 @@ class PublicProductsView(views.APIView):
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
-        tenants = []
         if site:
-            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
-            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
-            if tenants:
-                tenant = tenants[0]
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
         if tenant is None and aid:
             try:
                 from users.models import Tenant
                 tenant = Tenant.objects.filter(admin_id=int(aid)).first()
             except Exception:
                 tenant = None
-        if tenant is None:
-            ws = WebSettings.objects.filter(site_url='http://localhost:8080/').first() or WebSettings.objects.first() or WebSettings.objects.create()
-            tenant = ws.tenant
         vis_ids = list(VisibleProduct.objects.filter(active=True).order_by('position', 'product_id').values_list('product_id', flat=True))
-        base_qs = Product.objects.filter(id__in=vis_ids)
-        if tenants:
-            prods = base_qs.filter(tenant__in=tenants)
-            if not prods.exists():
-                prods = Product.objects.filter(tenant__in=tenants, active=True)
-        else:
-            prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
-            if tenant and not prods.exists():
-                prods = Product.objects.filter(tenant=tenant, active=True)
+        base_qs = Product.objects.filter(id__in=vis_ids).order_by('-created_at')
+        prods = base_qs.filter(tenant=tenant) if tenant else Product.objects.none()
         return Response(ProductSerializer(prods, many=True, context={'request': request}).data)
 
 
+class PublicProductDetailView(views.APIView):
+    permission_classes = [permissions.AllowAny]
+    def get(self, request, pk):
+        AccessLog.objects.create(user=None, path=f'public_product_detail:{pk}', success=True, user_agent=request.headers.get('User-Agent', ''))
+        aid = request.query_params.get('aid')
+        site = request.query_params.get('site')
+        tenant = None
+        if site:
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
+        if tenant is None and aid:
+            try:
+                from users.models import Tenant
+                tenant = Tenant.objects.filter(admin_id=int(aid)).first()
+            except Exception:
+                tenant = None
+        vis_ids = list(VisibleProduct.objects.filter(active=True).order_by('position', 'product_id').values_list('product_id', flat=True))
+        if pk not in vis_ids:
+            return Response({'detail': 'Producto no visible'}, status=status.HTTP_404_NOT_FOUND)
+        qs = Product.objects.filter(id=pk)
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        else:
+            qs = Product.objects.none()
+        prod = qs.first()
+        if not prod:
+            return Response({'detail': 'Producto no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ProductSerializer(prod, context={'request': request}).data)
+
 class PublicPolicyView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    @method_decorator(cache_page(300))
     def get(self, request):
         AccessLog.objects.create(user=None, path='public_policy', success=True, user_agent=request.headers.get('User-Agent', ''))
         pol = Policy.objects.first() or Policy.objects.create()
@@ -313,27 +407,28 @@ class PublicPolicyView(views.APIView):
 
 class PublicSettingsView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    @method_decorator(cache_page(300))
     def get(self, request):
         AccessLog.objects.create(user=None, path='public_settings', success=True, user_agent=request.headers.get('User-Agent', ''))
         aid = request.query_params.get('aid')
-        ws = None
-        if aid:
+        site = request.query_params.get('site')
+        tenant = None
+        if site:
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
+        if tenant is None and aid:
             try:
                 from users.models import Tenant
                 tenant = Tenant.objects.filter(admin_id=int(aid)).first()
-                if tenant:
-                    ws = WebSettings.objects.filter(tenant=tenant).first()
             except Exception:
-                ws = None
-        if ws is None:
-            ws = WebSettings.objects.first() or WebSettings.objects.create()
-        if not ws.site_url:
-            ws.site_url = 'http://localhost:8080/'
-            ws.save(update_fields=['site_url'])
-        return Response(WebSettingsSerializer(ws).data)
+                tenant = None
+        ws = AppSettings.objects.filter(tenant=tenant).first() if tenant else None
+        return Response(AppSettingsSerializer(ws).data if ws else {})
 
 class PublicPaymentsView(views.APIView):
     permission_classes = [permissions.AllowAny]
+    @method_decorator(cache_page(120))
     def get(self, request):
         AccessLog.objects.create(user=None, path='public_payments', success=True, user_agent=request.headers.get('User-Agent', ''))
         aid = request.query_params.get('aid')
@@ -341,8 +436,9 @@ class PublicPaymentsView(views.APIView):
         tenant = None
         ws = None
         if site:
-            ws = WebSettings.objects.filter(site_url=site).first()
-            tenant = ws and ws.tenant or None
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
         if tenant is None and aid:
             try:
                 from users.models import Tenant
@@ -350,7 +446,7 @@ class PublicPaymentsView(views.APIView):
             except Exception:
                 tenant = None
         if tenant is None:
-            ws = ws or (WebSettings.objects.filter(site_url='http://localhost:8080/').first() or WebSettings.objects.first() or WebSettings.objects.create())
+            ws = AppSettings.objects.first() or AppSettings.objects.create()
             tenant = ws.tenant
         qs = PaymentMethod.objects.filter(active=True)
         if tenant:
@@ -367,7 +463,7 @@ class PublicPaymentsView(views.APIView):
             }
             ec = pm.extra_config or {}
             if pm.provider == 'whatsapp':
-                phone = ec.get('phone') or (ws.company_whatsapp or ws.company_phone)
+                phone = ec.get('phone') or ((ws and ws.company_whatsapp) or (ws and ws.company_phone))
                 template = ec.get('template') or 'Hola, quiero confirmar mi pago para la orden {order_number} por {total}.'
                 item['whatsapp'] = {'phone': phone, 'template': template}
             elif pm.provider in ('mercadopago','paypal','stripe','credit_card'):
@@ -384,8 +480,9 @@ class PublicCheckoutView(views.APIView):
         site = request.query_params.get('site')
         tenant = None
         if site:
-            ws = WebSettings.objects.filter(site_url=site).first()
-            tenant = ws and ws.tenant or None
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
         if tenant is None and aid:
             try:
                 from users.models import Tenant
@@ -393,7 +490,7 @@ class PublicCheckoutView(views.APIView):
             except Exception:
                 tenant = None
         if tenant is None:
-            ws = WebSettings.objects.filter(site_url='http://localhost:8080/').first() or WebSettings.objects.first() or WebSettings.objects.create()
+            ws = AppSettings.objects.first() or AppSettings.objects.create()
             tenant = ws.tenant
         data = request.data or {}
         items = data.get('items') or []
@@ -497,8 +594,51 @@ class VisibleCategoryUpdateView(views.APIView):
                 obj.position = int(position)
             except Exception:
                 pass
+        try:
+            user_tenant = getattr(request.user, 'profile', None) and request.user.profile.tenant or None
+        except Exception:
+            user_tenant = None
+        try:
+            category = Category.objects.filter(id=category_id).first()
+            if category and user_tenant and getattr(category, 'tenant', None) is None:
+                category.tenant = user_tenant
+                category.save(update_fields=['tenant'])
+        except Exception:
+            pass
         obj.save()
         return Response(VisibleCategorySerializer(obj).data)
+
+class VisibleCategoryStatusListView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def get(self, request):
+        try:
+            profile = getattr(request.user, 'profile', None)
+            user_tenant = profile.tenant if profile else None
+            role = profile.role if profile else 'employee'
+        except Exception:
+            user_tenant = None
+            role = 'employee'
+        if user_tenant:
+            cats = Category.objects.filter(tenant=user_tenant).order_by('name', 'id')
+        else:
+            if role == 'super_admin':
+                cats = Category.objects.all().order_by('name', 'id')
+            elif role == 'admin':
+                cats = Category.objects.filter(tenant__isnull=True).order_by('name', 'id')
+            else:
+                cats = Category.objects.none()
+        result = []
+        for c in cats:
+            vc = VisibleCategory.objects.filter(category=c).first()
+            result.append({
+                'id': c.id,
+                'name': c.name,
+                'description': c.description,
+                'image': c.image.url if c.image else None,
+                'visible': bool(vc and vc.active),
+                'position': int(getattr(vc, 'position', 0) or 0),
+            })
+        return Response(result)
 
 
 class PublicCategoriesView(views.APIView):
@@ -508,34 +648,153 @@ class PublicCategoriesView(views.APIView):
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
-        tenants = []
         if site:
-            wq = WebSettings.objects.filter(site_url__in=_site_variants(site))
-            tenants = [ws.tenant for ws in wq if getattr(ws, 'tenant', None)]
-            if tenants:
-                tenant = tenants[0]
+            uu = UserURL.objects.filter(url__in=_site_variants(site)).order_by('-created_at').first()
+            if uu and hasattr(uu.user, 'profile'):
+                tenant = getattr(uu.user.profile, 'tenant', None)
         if tenant is None and aid:
             try:
                 from users.models import Tenant
                 tenant = Tenant.objects.filter(admin_id=int(aid)).first()
             except Exception:
                 tenant = None
-        if tenant is None:
-            ws = WebSettings.objects.filter(site_url='http://localhost:8080/').first() or WebSettings.objects.first() or WebSettings.objects.create()
-            tenant = ws.tenant
-        vis_ids = list(VisibleCategory.objects.filter(active=True).order_by('position', 'category_id').values_list('category_id', flat=True))
-        base_qs = Category.objects.filter(id__in=vis_ids)
-        if tenants:
-            cats = base_qs.filter(tenant__in=tenants)
-            if not cats.exists():
-                cats = Category.objects.filter(tenant__in=tenants, active=True)
-        else:
-            cats = base_qs.filter(tenant=tenant) if tenant else Category.objects.none()
-            if tenant and not cats.exists():
-                cats = Category.objects.filter(tenant=tenant, active=True)
+        vis_cat_ids = list(VisibleCategory.objects.filter(active=True).order_by('position', 'category_id').values_list('category_id', flat=True))
+        base_qs = Category.objects.filter(id__in=vis_cat_ids).order_by('-created_at')
+        cats = base_qs.filter(tenant=tenant) if tenant else Category.objects.none()
         return Response([{
             'id': c.id,
             'name': c.name,
             'description': c.description,
-            'image': c.image.url if c.image else None,
+            'image': (request.build_absolute_uri(c.image.url) if (getattr(c, 'image', None) and getattr(c.image, 'url', None) and str(c.image.url).startswith('/')) else (c.image.url if getattr(c, 'image', None) else None)),
         } for c in cats])
+class UserURLAvailabilityView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def get(self, request):
+        raw = (request.query_params.get('url') or request.query_params.get('slug') or '').strip()
+        if not raw:
+            return Response({'available': False, 'message': 'URL requerida.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            parsed = urlparse(raw)
+            if not (parsed.scheme and parsed.netloc):
+                return Response({'available': False, 'message': 'URL inválida.'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({'available': False, 'message': 'URL inválida.'}, status=status.HTTP_400_BAD_REQUEST)
+        exists = UserURL.objects.filter(url__in=_site_variants(raw)).exists()
+        if exists:
+            AccessLog.objects.create(user=request.user, path=f'user_url_availability:{raw}', success=False, user_agent=request.headers.get('User-Agent', ''))
+            return Response({'available': False, 'message': 'La URL ya está registrada.'}, status=status.HTTP_200_OK)
+        return Response({'available': True, 'message': 'Disponible.'}, status=status.HTTP_200_OK)
+
+
+class UserURLListCreateView(generics.ListCreateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserURLSerializer
+    def get_queryset(self):
+        return UserURL.objects.filter(user=self.request.user).order_by('-created_at')
+    def perform_create(self, serializer):
+        raw = (self.request.data.get('url') or self.request.data.get('slug') or '').strip()
+        if not raw:
+            raise serializers.ValidationError({'url': 'URL requerida.'})
+        try:
+            parsed = urlparse(raw)
+            if not (parsed.scheme and parsed.netloc):
+                raise serializers.ValidationError({'url': 'URL inválida.'})
+        except Exception:
+            raise serializers.ValidationError({'url': 'URL inválida.'})
+        canonical = raw[:-1] if raw.endswith('/') else raw
+        if UserURL.objects.filter(url__in=_site_variants(raw)).exists():
+            AccessLog.objects.create(user=self.request.user, path=f'user_url_create:{raw}', success=False, user_agent=self.request.headers.get('User-Agent', ''))
+            raise serializers.ValidationError({'url': 'La URL ya está registrada.'})
+        serializer.save(user=self.request.user, url=canonical)
+
+
+class UserURLDetailView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def delete(self, request, pk):
+        obj = UserURL.objects.filter(id=pk).first()
+        if not obj:
+            return Response({'detail': 'URL no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        if obj.user != request.user:
+            return Response({'detail': 'No autorizado para eliminar esta URL.'}, status=status.HTTP_403_FORBIDDEN)
+        AccessLog.objects.create(user=request.user, path=f'user_url_delete:{obj.url}', success=True, user_agent=request.headers.get('User-Agent', ''))
+        obj.delete()
+        return Response({'message': 'URL eliminada.'}, status=status.HTTP_200_OK)
+
+
+class SiteURLStatusView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def get(self, request):
+        try:
+            profile = getattr(request.user, 'profile', None)
+            user_tenant = profile.tenant if profile else None
+        except Exception:
+            user_tenant = None
+        my_urls = list(UserURL.objects.filter(user=request.user).order_by('-created_at'))
+        current = my_urls[0].url if my_urls else ''
+        dups = []
+        if current:
+            dups = list(UserURL.objects.filter(url__in=_site_variants(current)).exclude(user=request.user))
+        return Response({
+            'site_url': current,
+            'tenant_id': getattr(user_tenant, 'id', None),
+            'duplicates_count': len(dups),
+            'duplicates': [{'id': x.id, 'user_id': getattr(x.user, 'id', None), 'url': x.url} for x in dups],
+            'ok': len(dups) == 0,
+        })
+
+
+class SiteURLClaimView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def post(self, request):
+        try:
+            profile = getattr(request.user, 'profile', None)
+            user_tenant = profile.tenant if profile else None
+        except Exception:
+            user_tenant = None
+        site = (request.data.get('site_url') or request.data.get('site') or '').strip()
+        if not user_tenant or not site:
+            return Response({'detail': 'Tenant o site requerido.'}, status=status.HTTP_400_BAD_REQUEST)
+        variants = _site_variants(site)
+        conflict = UserURL.objects.filter(url__in=variants).exclude(user=request.user).first()
+        if conflict:
+            return Response({'detail': 'La URL ya está registrada por otro usuario.'}, status=status.HTTP_400_BAD_REQUEST)
+        canonical = site[:-1] if site.endswith('/') else site
+        mine = UserURL.objects.filter(user=request.user).order_by('-created_at').first()
+        if mine:
+            mine.url = canonical
+            mine.save(update_fields=['url'])
+        else:
+            UserURL.objects.create(user=request.user, url=canonical)
+        return Response({'site_url': canonical, 'tenant_id': getattr(user_tenant, 'id', None)})
+
+
+class PublicAutoClaimView(views.APIView):
+    permission_classes = [permissions.AllowAny]
+    def post(self, request):
+        site = (request.data.get('site') or '').strip()
+        aid = request.data.get('aid')
+        if not site or not aid:
+            return Response({'detail': 'site y aid requeridos.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            from users.models import Tenant
+            tenant = Tenant.objects.filter(admin_id=int(aid)).first()
+        except Exception:
+            tenant = None
+        if not tenant:
+            return Response({'detail': 'Tenant no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        from django.contrib.auth.models import User as AuthUser
+        owner = AuthUser.objects.filter(id=tenant.admin_id).first()
+        if not owner:
+            return Response({'detail': 'Administrador no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        variants = _site_variants(site)
+        conflict = UserURL.objects.filter(url__in=variants).exclude(user=owner).first()
+        if conflict:
+            return Response({'detail': 'La URL ya está registrada.'}, status=status.HTTP_400_BAD_REQUEST)
+        canonical = site[:-1] if site.endswith('/') else site
+        existing = UserURL.objects.filter(user=owner).order_by('-created_at').first()
+        if existing:
+            existing.url = canonical
+            existing.save(update_fields=['url'])
+        else:
+            UserURL.objects.create(user=owner, url=canonical)
+        return Response({'site_url': canonical, 'tenant_id': getattr(tenant, 'id', None)})

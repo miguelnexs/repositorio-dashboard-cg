@@ -1,16 +1,6 @@
 from django.contrib import admin
 from users.admin import role_admin_site
-from .models import WebSettings, PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, VisibleCategory, AccessLog
-
-class WebSettingsAdmin(admin.ModelAdmin):
-    list_display = ('site_url', 'company_name', 'updated_at')
-    search_fields = ('company_name', 'site_url')
-    def has_module_permission(self, request): return True
-    def has_view_permission(self, request, obj=None): return True
-    def has_add_permission(self, request): return True
-    def has_change_permission(self, request, obj=None): return True
-    def has_delete_permission(self, request, obj=None): return True
-    def get_model_perms(self, request): return {'add': True, 'change': True, 'delete': True, 'view': True}
+from .models import PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, VisibleCategory, AccessLog, UserURL
 
 class PaymentMethodAdmin(admin.ModelAdmin):
     list_display = ('name', 'provider', 'fee_percent', 'active')
@@ -84,7 +74,6 @@ class AccessLogAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None): return True
     def get_model_perms(self, request): return {'add': True, 'change': True, 'delete': True, 'view': True}
 
-role_admin_site.register(WebSettings, WebSettingsAdmin)
 role_admin_site.register(PaymentMethod, PaymentMethodAdmin)
 role_admin_site.register(Banner, BannerAdmin)
 role_admin_site.register(Policy, PolicyAdmin)
@@ -92,3 +81,15 @@ role_admin_site.register(VisitStat, VisitStatAdmin)
 role_admin_site.register(VisibleProduct, VisibleProductAdmin)
 role_admin_site.register(VisibleCategory, VisibleCategoryAdmin)
 role_admin_site.register(AccessLog, AccessLogAdmin)
+ 
+class UserURLAdmin(admin.ModelAdmin):
+    list_display = ('url', 'user', 'created_at')
+    search_fields = ('url', 'user__username', 'user__email')
+    def has_module_permission(self, request): return True
+    def has_view_permission(self, request, obj=None): return True
+    def has_add_permission(self, request): return True
+    def has_change_permission(self, request, obj=None): return True
+    def has_delete_permission(self, request, obj=None): return True
+    def get_model_perms(self, request): return {'add': True, 'change': True, 'delete': True, 'view': True}
+ 
+role_admin_site.register(UserURL, UserURLAdmin)

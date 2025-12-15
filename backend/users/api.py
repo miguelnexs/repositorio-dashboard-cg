@@ -84,7 +84,30 @@ class MeView(APIView):
             'username': request.user.username,
             'role': role,
             'email': request.user.email,
+            'first_name': request.user.first_name,
+            'last_name': request.user.last_name,
+            'phone': getattr(getattr(request.user, 'profile', None), 'phone', None),
+            'department': getattr(getattr(request.user, 'profile', None), 'department', None),
+            'position': getattr(getattr(request.user, 'profile', None), 'position', None),
         }, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        user = request.user
+        for field in ['email', 'first_name', 'last_name']:
+            if field in request.data:
+                setattr(user, field, request.data.get(field) or '')
+        if 'password' in request.data and request.data['password']:
+            user.set_password(request.data['password'])
+        user.save()
+        try:
+            profile = user.profile
+        except UserProfile.DoesNotExist:
+            profile = UserProfile.objects.create(user=user, role='employee')
+        for pfield in ['phone', 'department', 'position']:
+            if pfield in request.data:
+                setattr(profile, pfield, request.data.get(pfield))
+        profile.save()
+        return Response(_serialize_user(user), status=status.HTTP_200_OK)
 
 
 def _serialize_user(user: User):
@@ -137,14 +160,32 @@ class UsersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Solo administradores pueden listar usuarios (empleados)
-        if _get_user_role(request.user) != 'admin':
-            return Response({'detail': 'Solo administradores pueden gestionar usuarios.'}, status=status.HTTP_403_FORBIDDEN)
-        # Limitar a empleados del mismo tenant
-        ensure_tenant_for_user(request.user)
-        admin_tenant = _get_user_tenant(request.user)
-        users = User.objects.filter(profile__role='employee', profile__tenant=admin_tenant).select_related('profile')
-        return Response([_serialize_user(u) for u in users], status=status.HTTP_200_OK)
+        try:
+            role = _get_user_role(request.user)
+            if role not in ('admin', 'super_admin'):
+                return Response({'detail': 'Solo administradores pueden gestionar usuarios.'}, status=status.HTTP_403_FORBIDDEN)
+            if role == 'admin':
+                try:
+                    ensure_tenant_for_user(request.user)
+                except Exception:
+                    pass
+                admin_tenant = _get_user_tenant(request.user)
+                if admin_tenant:
+                    users = User.objects.filter(profile__role='employee', profile__tenant=admin_tenant).select_related('profile')
+                else:
+                    users = User.objects.none()
+            else:
+                tenant_id = request.query_params.get('tenant_id')
+                role_param = request.query_params.get('role')
+                qs = User.objects.all().select_related('profile')
+                if role_param in ('employee', 'admin', 'employer', 'super_admin'):
+                    qs = qs.filter(profile__role=role_param)
+                if tenant_id:
+                    qs = qs.filter(profile__tenant_id=tenant_id)
+                users = qs
+            return Response([_serialize_user(u) for u in users], status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'detail': f'Error listando usuarios: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request):
         # Reglas de creación por rol
@@ -223,6 +264,9 @@ class UsersView(APIView):
             UserProfile.objects.create(
                 user=user,
                 role=target_role,
+                phone=phone,
+                department=department,
+                position=position,
             )
         return Response(_serialize_user(user), status=status.HTTP_201_CREATED)
 
@@ -231,25 +275,25 @@ class UserDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, user_id):
-        # Solo administradores, y solo eliminar empleados
-        if _get_user_role(request.user) != 'admin':
+        role = _get_user_role(request.user)
+        if role not in ('admin', 'super_admin'):
             return Response({'detail': 'Solo administradores pueden eliminar usuarios.'}, status=status.HTTP_403_FORBIDDEN)
         target = User.objects.filter(id=user_id).first()
         if not target:
             return Response({'detail': 'Usuario no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
         if _get_user_role(target) != 'employee':
             return Response({'detail': 'Solo se pueden eliminar cuentas de empleados.'}, status=status.HTTP_403_FORBIDDEN)
-        # Limitar a empleados del mismo tenant
-        admin_tenant = _get_user_tenant(request.user)
-        target_tenant = _get_user_tenant(target)
-        if target_tenant != admin_tenant:
-            return Response({'detail': 'No puede eliminar empleados de otro tenant.'}, status=status.HTTP_403_FORBIDDEN)
+        if role == 'admin':
+            admin_tenant = _get_user_tenant(request.user)
+            target_tenant = _get_user_tenant(target)
+            if target_tenant != admin_tenant:
+                return Response({'detail': 'No puede eliminar empleados de otro tenant.'}, status=status.HTTP_403_FORBIDDEN)
         target.delete()
         return Response({'message': 'Usuario eliminado.'}, status=status.HTTP_200_OK)
 
     def patch(self, request, user_id):
-        # Solo administradores pueden actualizar datos de empleados; no se permite cambiar rol
-        if _get_user_role(request.user) != 'admin':
+        role = _get_user_role(request.user)
+        if role not in ('admin', 'super_admin'):
             return Response({'detail': 'Solo administradores pueden actualizar usuarios.'}, status=status.HTTP_403_FORBIDDEN)
         target = User.objects.filter(id=user_id).select_related('profile').first()
         if not target:
@@ -257,10 +301,11 @@ class UserDetailView(APIView):
         # Solo se permite actualizar empleados del mismo tenant
         if _get_user_role(target) != 'employee':
             return Response({'detail': 'Solo se pueden actualizar cuentas de empleados.'}, status=status.HTTP_403_FORBIDDEN)
-        admin_tenant = _get_user_tenant(request.user)
-        target_tenant = _get_user_tenant(target)
-        if target_tenant != admin_tenant:
-            return Response({'detail': 'No puede actualizar empleados de otro tenant.'}, status=status.HTTP_403_FORBIDDEN)
+        if role == 'admin':
+            admin_tenant = _get_user_tenant(request.user)
+            target_tenant = _get_user_tenant(target)
+            if target_tenant != admin_tenant:
+                return Response({'detail': 'No puede actualizar empleados de otro tenant.'}, status=status.HTTP_403_FORBIDDEN)
         # No permitir cambiar el rol por este endpoint
         if 'role' in request.data:
             return Response({'detail': 'Cambio de rol no permitido.'}, status=status.HTTP_403_FORBIDDEN)
