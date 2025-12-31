@@ -36,3 +36,4 @@ class AppSettings(models.Model):
     paper_width_mm = models.PositiveIntegerField(default=58)
     auto_print = models.BooleanField(default=True)
     receipt_footer = models.TextField(blank=True, default='')
+    whatsapp_config = models.JSONField(default=dict, blank=True)

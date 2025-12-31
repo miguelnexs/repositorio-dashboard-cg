@@ -5,6 +5,7 @@ from .utils.crypto import encrypt_text, is_encrypted_text
 
 # Import tenant configuration models
 from .models_tenant_config import TenantConfiguration, TenantTheme, TenantPermission
+from .models_subscription import SubscriptionPlan
 
 # Definición de roles
 ROLE_CHOICES = (
@@ -18,6 +19,10 @@ class Tenant(models.Model):
     admin = models.OneToOneField(User, on_delete=models.CASCADE, related_name='tenant')
     db_alias = models.CharField(max_length=64, unique=True)
     db_path = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255, default="Mi Negocio")
+    subscription_plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name='tenants')
+    stripe_customer_id = models.CharField(max_length=255, blank=True, null=True)
+    stripe_subscription_id = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"Tenant({self.admin.username})"

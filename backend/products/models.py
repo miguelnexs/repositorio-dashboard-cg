@@ -14,6 +14,11 @@ class Product(models.Model):
     inventory_qty = models.PositiveIntegerField(default=0)
     image = models.ImageField(upload_to='products/', null=True, blank=True)
     active = models.BooleanField(default=True)
+    
+    # DIAN Fields
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=19.00, help_text="Porcentaje de IVA (0, 5, 19)")
+    unit_measure = models.CharField(max_length=10, default='94', help_text="Código de unidad (94=Unidad, KGM=Kilogramo)")
+    
     tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
     created_at = models.DateTimeField(auto_now_add=True)
 

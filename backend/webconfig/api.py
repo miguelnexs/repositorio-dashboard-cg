@@ -1,4 +1,5 @@
 from rest_framework import serializers, generics, views, status, permissions
+from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
 import re
@@ -7,6 +8,7 @@ from rest_framework.response import Response
 from .models import PaymentMethod, Banner, Policy, VisitStat, VisibleProduct, AccessLog, VisibleCategory, UserURL
 from config.models import AppSettings
 from django.db import models
+from users.utils.crypto import encrypt_text, is_encrypted_text
 from products.api import ProductSerializer
 from products.models import Product, Category, ProductColor, ProductVariant
 from sales.models import Sale, SaleItem
@@ -41,18 +43,78 @@ def _site_variants(site: str):
         return [site]
 
 
+def _ua(request):
+    try:
+        return (request.headers.get('User-Agent', '') or '')[:255]
+    except Exception:
+        return ''
+
+def _log(request, path, success, user=None):
+    try:
+        AccessLog.objects.create(
+            user=user,
+            path=(path or '')[:255],
+            success=bool(success),
+            user_agent=_ua(request)
+        )
+    except Exception:
+        pass
+
+
 class AppSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppSettings
         fields = ['id', 'primary_color', 'secondary_color', 'font_family', 'logo', 'currencies', 'updated_at',
                   'company_name','company_nit','company_phone','company_whatsapp','company_email','company_address','company_description',
-                  'printer_type','printer_name','paper_width_mm','auto_print','receipt_footer']
+                  'printer_type','printer_name','paper_width_mm','auto_print','receipt_footer', 'whatsapp_config']
+
+    def validate_whatsapp_config(self, value):
+        if isinstance(value, dict):
+            if 'access_token' in value:
+                token = value['access_token']
+                if token and not is_encrypted_text(token):
+                    value['access_token'] = encrypt_text(token)
+        return value
+
+    def update(self, instance, validated_data):
+        if 'whatsapp_config' in validated_data:
+            new_config = validated_data['whatsapp_config']
+            old_config = instance.whatsapp_config or {}
+            
+            # Preserve sensitive keys if not provided in update
+            if 'access_token' not in new_config and 'access_token' in old_config:
+                new_config['access_token'] = old_config['access_token']
+                
+            validated_data['whatsapp_config'] = new_config
+            
+        return super().update(instance, validated_data)
 
 
 class PaymentMethodSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentMethod
         fields = ['id', 'name', 'provider', 'fee_percent', 'active', 'currencies', 'extra_config', 'created_at']
+
+    def validate_extra_config(self, value):
+        if isinstance(value, dict):
+            if 'private_key' in value:
+                pk = value['private_key']
+                if pk and not is_encrypted_text(pk):
+                    value['private_key'] = encrypt_text(pk)
+        return value
+
+    def update(self, instance, validated_data):
+        if 'extra_config' in validated_data:
+            new_config = validated_data['extra_config']
+            old_config = instance.extra_config or {}
+            
+            # Preserve sensitive keys if not provided in update
+            if 'private_key' not in new_config and 'private_key' in old_config:
+                new_config['private_key'] = old_config['private_key']
+                
+            validated_data['extra_config'] = new_config
+            
+        return super().update(instance, validated_data)
 
 
 class BannerSerializer(serializers.ModelSerializer):
@@ -297,7 +359,7 @@ class PortalView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request):
         ok = request.user and request.user.is_authenticated
-        AccessLog.objects.create(user=request.user if ok else None, path='portal', success=ok, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'portal', ok, request.user if ok else None)
         if not ok:
             return Response({'detail': 'Unauthorized'}, status=status.HTTP_401_UNAUTHORIZED)
         vis_ids = list(VisibleProduct.objects.filter(active=True).values_list('product_id', flat=True))
@@ -314,7 +376,7 @@ class PortalView(views.APIView):
 class PublicPortalView(views.APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_portal', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_portal', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -346,7 +408,7 @@ class PublicPortalView(views.APIView):
 class PublicProductsView(views.APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_products', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_products', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -369,7 +431,7 @@ class PublicProductsView(views.APIView):
 class PublicProductDetailView(views.APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request, pk):
-        AccessLog.objects.create(user=None, path=f'public_product_detail:{pk}', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, f'public_product_detail:{pk}', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -400,7 +462,7 @@ class PublicPolicyView(views.APIView):
     permission_classes = [permissions.AllowAny]
     @method_decorator(cache_page(300))
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_policy', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_policy', True, None)
         pol = Policy.objects.first() or Policy.objects.create()
         return Response(PolicySerializer(pol).data)
 
@@ -409,7 +471,7 @@ class PublicSettingsView(views.APIView):
     permission_classes = [permissions.AllowAny]
     @method_decorator(cache_page(300))
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_settings', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_settings', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -424,13 +486,15 @@ class PublicSettingsView(views.APIView):
             except Exception:
                 tenant = None
         ws = AppSettings.objects.filter(tenant=tenant).first() if tenant else None
-        return Response(AppSettingsSerializer(ws).data if ws else {})
+        data = AppSettingsSerializer(ws).data if ws else {}
+        data['google_client_id'] = getattr(settings, 'GOOGLE_CLIENT_ID', '')
+        return Response(data)
 
 class PublicPaymentsView(views.APIView):
     permission_classes = [permissions.AllowAny]
     @method_decorator(cache_page(120))
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_payments', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_payments', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -463,7 +527,7 @@ class PublicPaymentsView(views.APIView):
             }
             ec = pm.extra_config or {}
             if pm.provider == 'whatsapp':
-                phone = ec.get('phone') or ((ws and ws.company_whatsapp) or (ws and ws.company_phone))
+                phone = ec.get('phone') or ec.get('phone_number') or ((ws and ws.company_whatsapp) or (ws and ws.company_phone))
                 template = ec.get('template') or 'Hola, quiero confirmar mi pago para la orden {order_number} por {total}.'
                 item['whatsapp'] = {'phone': phone, 'template': template}
             elif pm.provider in ('mercadopago','paypal','stripe','credit_card'):
@@ -475,7 +539,7 @@ class PublicPaymentsView(views.APIView):
 class PublicCheckoutView(views.APIView):
     permission_classes = [permissions.AllowAny]
     def post(self, request):
-        AccessLog.objects.create(user=None, path='public_checkout', success=False, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_checkout', False, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -492,6 +556,18 @@ class PublicCheckoutView(views.APIView):
         if tenant is None:
             ws = AppSettings.objects.first() or AppSettings.objects.create()
             tenant = ws.tenant
+        
+        # Check plan limits for public checkout
+        if tenant and tenant.subscription_plan:
+            plan = tenant.subscription_plan
+            if plan.max_transactions_per_month != -1:
+                from django.utils import timezone
+                now = timezone.now()
+                month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                current_sales = Sale.objects.filter(tenant=tenant, created_at__gte=month_start).exclude(status='canceled').count()
+                if current_sales >= plan.max_transactions_per_month:
+                    return Response({'detail': 'El comercio ha alcanzado su límite de órdenes mensuales. Contacte al administrador.'}, status=status.HTTP_403_FORBIDDEN)
+
         data = request.data or {}
         items = data.get('items') or []
         client = data.get('client') or {}
@@ -557,13 +633,47 @@ class PublicCheckoutView(views.APIView):
                     total_amount += (price * qty)
                 sale.total_amount = total_amount
                 sale.save(update_fields=['total_amount'])
-                AccessLog.objects.create(user=None, path='public_checkout', success=True, user_agent=request.headers.get('User-Agent', ''))
+                _log(request, 'public_checkout', True, None)
                 try:
                     from sales.models import OrderNotification
                     OrderNotification.objects.create(sale=sale, tenant=tenant, read=False)
                 except Exception:
                     pass
-                return Response({'order_number': sale.order_number, 'total_amount': total_amount}, status=status.HTTP_201_CREATED)
+                
+                # Process Payment
+                payment_url = None
+                if payment_method_id:
+                    try:
+                        pm = PaymentMethod.objects.filter(id=payment_method_id).first()
+                        if pm and pm.active:
+                            if tenant and pm.tenant_id != tenant.id:
+                                # Payment method not from this tenant
+                                pass
+                            else:
+                                processor = PaymentProcessor(pm)
+                                # Determine return URLs
+                                base_url = site if site else 'http://localhost:5173'
+                                if not base_url.startswith('http'):
+                                    base_url = f'https://{base_url}'
+                                
+                                return_url = f"{base_url}/checkout?order={sale.order_number}&status=success"
+                                cancel_url = f"{base_url}/checkout?order={sale.order_number}&status=cancel"
+                                
+                                result = processor.create_payment_intent(sale, return_url, cancel_url)
+                                if result and 'payment_url' in result:
+                                    payment_url = result['payment_url']
+                    except Exception as e:
+                        # Log error but don't fail the order creation? 
+                        # Or should we fail? Usually better to fail if payment init fails.
+                        # But for now let's just log and return order.
+                        print(f"Payment init failed: {e}")
+                        pass
+
+                return Response({
+                    'order_number': sale.order_number, 
+                    'total_amount': total_amount,
+                    'payment_url': payment_url
+                }, status=status.HTTP_201_CREATED)
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -644,7 +754,7 @@ class VisibleCategoryStatusListView(views.APIView):
 class PublicCategoriesView(views.APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request):
-        AccessLog.objects.create(user=None, path='public_categories', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, 'public_categories', True, None)
         aid = request.query_params.get('aid')
         site = request.query_params.get('site')
         tenant = None
@@ -679,9 +789,12 @@ class UserURLAvailabilityView(views.APIView):
                 return Response({'available': False, 'message': 'URL inválida.'}, status=status.HTTP_400_BAD_REQUEST)
         except Exception:
             return Response({'available': False, 'message': 'URL inválida.'}, status=status.HTTP_400_BAD_REQUEST)
-        exists = UserURL.objects.filter(url__in=_site_variants(raw)).exists()
+        try:
+            exists = UserURL.objects.filter(url__in=_site_variants(raw)).exists()
+        except Exception:
+            return Response({'available': False, 'message': 'Servicio no disponible.'}, status=status.HTTP_200_OK)
         if exists:
-            AccessLog.objects.create(user=request.user, path=f'user_url_availability:{raw}', success=False, user_agent=request.headers.get('User-Agent', ''))
+            _log(request, f'user_url_availability:{raw}', False, request.user)
             return Response({'available': False, 'message': 'La URL ya está registrada.'}, status=status.HTTP_200_OK)
         return Response({'available': True, 'message': 'Disponible.'}, status=status.HTTP_200_OK)
 
@@ -690,7 +803,10 @@ class UserURLListCreateView(generics.ListCreateAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = UserURLSerializer
     def get_queryset(self):
-        return UserURL.objects.filter(user=self.request.user).order_by('-created_at')
+        try:
+            return UserURL.objects.filter(user=self.request.user).order_by('-created_at')
+        except Exception:
+            return UserURL.objects.none()
     def perform_create(self, serializer):
         raw = (self.request.data.get('url') or self.request.data.get('slug') or '').strip()
         if not raw:
@@ -702,21 +818,29 @@ class UserURLListCreateView(generics.ListCreateAPIView):
         except Exception:
             raise serializers.ValidationError({'url': 'URL inválida.'})
         canonical = raw[:-1] if raw.endswith('/') else raw
-        if UserURL.objects.filter(url__in=_site_variants(raw)).exists():
-            AccessLog.objects.create(user=self.request.user, path=f'user_url_create:{raw}', success=False, user_agent=self.request.headers.get('User-Agent', ''))
-            raise serializers.ValidationError({'url': 'La URL ya está registrada.'})
-        serializer.save(user=self.request.user, url=canonical)
+        if len(canonical) > 256:
+            raise serializers.ValidationError({'url': 'La URL es demasiado larga.'})
+        try:
+            if UserURL.objects.filter(url__in=_site_variants(raw)).exists():
+                _log(self.request, f'user_url_create:{raw}', False, self.request.user)
+                raise serializers.ValidationError({'url': 'La URL ya está registrada.'})
+            serializer.save(user=self.request.user, url=canonical)
+        except Exception:
+            raise serializers.ValidationError({'detail': 'Servicio no disponible.'})
 
 
 class UserURLDetailView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
     def delete(self, request, pk):
-        obj = UserURL.objects.filter(id=pk).first()
+        try:
+            obj = UserURL.objects.filter(id=pk).first()
+        except Exception:
+            return Response({'detail': 'Servicio no disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if not obj:
             return Response({'detail': 'URL no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
         if obj.user != request.user:
             return Response({'detail': 'No autorizado para eliminar esta URL.'}, status=status.HTTP_403_FORBIDDEN)
-        AccessLog.objects.create(user=request.user, path=f'user_url_delete:{obj.url}', success=True, user_agent=request.headers.get('User-Agent', ''))
+        _log(request, f'user_url_delete:{obj.url}', True, request.user)
         obj.delete()
         return Response({'message': 'URL eliminada.'}, status=status.HTTP_200_OK)
 
@@ -729,11 +853,17 @@ class SiteURLStatusView(views.APIView):
             user_tenant = profile.tenant if profile else None
         except Exception:
             user_tenant = None
-        my_urls = list(UserURL.objects.filter(user=request.user).order_by('-created_at'))
+        try:
+            my_urls = list(UserURL.objects.filter(user=request.user).order_by('-created_at'))
+        except Exception:
+            my_urls = []
         current = my_urls[0].url if my_urls else ''
         dups = []
         if current:
-            dups = list(UserURL.objects.filter(url__in=_site_variants(current)).exclude(user=request.user))
+            try:
+                dups = list(UserURL.objects.filter(url__in=_site_variants(current)).exclude(user=request.user))
+            except Exception:
+                dups = []
         return Response({
             'site_url': current,
             'tenant_id': getattr(user_tenant, 'id', None),
@@ -755,16 +885,22 @@ class SiteURLClaimView(views.APIView):
         if not user_tenant or not site:
             return Response({'detail': 'Tenant o site requerido.'}, status=status.HTTP_400_BAD_REQUEST)
         variants = _site_variants(site)
-        conflict = UserURL.objects.filter(url__in=variants).exclude(user=request.user).first()
+        try:
+            conflict = UserURL.objects.filter(url__in=variants).exclude(user=request.user).first()
+        except Exception:
+            return Response({'detail': 'Servicio no disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if conflict:
             return Response({'detail': 'La URL ya está registrada por otro usuario.'}, status=status.HTTP_400_BAD_REQUEST)
         canonical = site[:-1] if site.endswith('/') else site
-        mine = UserURL.objects.filter(user=request.user).order_by('-created_at').first()
-        if mine:
-            mine.url = canonical
-            mine.save(update_fields=['url'])
-        else:
-            UserURL.objects.create(user=request.user, url=canonical)
+        try:
+            mine = UserURL.objects.filter(user=request.user).order_by('-created_at').first()
+            if mine:
+                mine.url = canonical
+                mine.save(update_fields=['url'])
+            else:
+                UserURL.objects.create(user=request.user, url=canonical)
+        except Exception:
+            return Response({'detail': 'Servicio no disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({'site_url': canonical, 'tenant_id': getattr(user_tenant, 'id', None)})
 
 
@@ -787,14 +923,20 @@ class PublicAutoClaimView(views.APIView):
         if not owner:
             return Response({'detail': 'Administrador no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
         variants = _site_variants(site)
-        conflict = UserURL.objects.filter(url__in=variants).exclude(user=owner).first()
+        try:
+            conflict = UserURL.objects.filter(url__in=variants).exclude(user=owner).first()
+        except Exception:
+            return Response({'detail': 'Servicio no disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         if conflict:
             return Response({'detail': 'La URL ya está registrada.'}, status=status.HTTP_400_BAD_REQUEST)
         canonical = site[:-1] if site.endswith('/') else site
-        existing = UserURL.objects.filter(user=owner).order_by('-created_at').first()
-        if existing:
-            existing.url = canonical
-            existing.save(update_fields=['url'])
-        else:
-            UserURL.objects.create(user=owner, url=canonical)
+        try:
+            existing = UserURL.objects.filter(user=owner).order_by('-created_at').first()
+            if existing:
+                existing.url = canonical
+                existing.save(update_fields=['url'])
+            else:
+                UserURL.objects.create(user=owner, url=canonical)
+        except Exception:
+            return Response({'detail': 'Servicio no disponible.'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({'site_url': canonical, 'tenant_id': getattr(tenant, 'id', None)})

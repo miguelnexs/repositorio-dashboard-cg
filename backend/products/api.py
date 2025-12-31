@@ -170,6 +170,16 @@ class ProductListCreateView(ListCreateAPIView):
         if not tenant:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('No tiene tenant asignado. Contacte al administrador.')
+        
+        # Check plan limits
+        if tenant.subscription_plan:
+            plan = tenant.subscription_plan
+            if plan.max_products != -1:
+                count = Product.objects.filter(tenant=tenant).count()
+                if count >= plan.max_products:
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied(f'Límite de productos alcanzado ({plan.max_products}). Actualice su plan.')
+
         serializer.save(tenant=tenant)
 
 
@@ -277,6 +287,16 @@ class CategoryListCreateView(ListCreateAPIView):
         if not tenant and role != 'super_admin':
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('No tiene tenant asignado. Contacte al administrador.')
+        
+        # Check plan limits
+        if tenant and tenant.subscription_plan:
+            plan = tenant.subscription_plan
+            if plan.max_categories != -1:
+                count = Category.objects.filter(tenant=tenant).count()
+                if count >= plan.max_categories:
+                    from rest_framework.exceptions import PermissionDenied
+                    raise PermissionDenied(f'Límite de categorías alcanzado ({plan.max_categories}). Actualice su plan.')
+
         serializer.save(tenant=tenant if tenant else None)
 
 

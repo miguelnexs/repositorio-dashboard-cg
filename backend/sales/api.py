@@ -37,6 +37,7 @@ class SaleCreateSerializer(serializers.Serializer):
     client_full_name = serializers.CharField(required=False)
     client_cedula = serializers.CharField(required=False)
     client_email = serializers.EmailField(required=False)
+    client_phone = serializers.CharField(required=False)
     client_address = serializers.CharField(required=False)
     items = SaleItemInputSerializer(many=True)
 
@@ -58,6 +59,16 @@ class SaleView(APIView):
         data = ser.validated_data
         tenant = _get_user_tenant(request.user)
 
+        # Verify plan limits
+        if tenant and tenant.subscription_plan:
+            plan = tenant.subscription_plan
+            if plan.max_transactions_per_month != -1:
+                now = timezone.now()
+                month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                current_sales = Sale.objects.filter(tenant=tenant, created_at__gte=month_start).exclude(status='canceled').count()
+                if current_sales >= plan.max_transactions_per_month:
+                     return Response({'detail': f'Ha alcanzado el límite de transacciones mensuales de su plan ({plan.max_transactions_per_month}). Actualice su plan para continuar.'}, status=403)
+
         client = None
         if data.get('client_id'):
             client = Client.objects.filter(id=data['client_id']).first()
@@ -68,6 +79,7 @@ class SaleView(APIView):
                 full_name=data['client_full_name'],
                 cedula=data['client_cedula'],
                 email=data['client_email'],
+                phone=data.get('client_phone', ''),
                 address=data['client_address'],
                 tenant=tenant,
             )
@@ -133,6 +145,14 @@ class SaleView(APIView):
 
         sale.total_amount = total
         sale.save(update_fields=['total_amount'])
+
+        # Send WhatsApp confirmation if configured
+        try:
+            from .whatsapp_service import WhatsAppService
+            ws = WhatsAppService(tenant=tenant)
+            ws.send_order_confirmation(sale)
+        except Exception:
+            pass
 
         items_out = []
         for si in sale.items.select_related('product', 'color', 'variant'):
@@ -218,10 +238,22 @@ class SalesListView(ListAPIView):
                     'unit_price': str(si.unit_price),
                     'line_total': str(si.line_total),
                 })
+            dian_info = None
+            if hasattr(sale, 'electronic_invoice'):
+                ei = sale.electronic_invoice
+                dian_info = {
+                    'status': ei.status,
+                    'cufe': ei.cufe,
+                    'created_at': ei.created_at.isoformat(),
+                    'xml_url': abs_url(ei.xml_file.url) if ei.xml_file else None,
+                    'pdf_url': abs_url(ei.pdf_file.url) if ei.pdf_file else None,
+                }
+
             return {
                 'id': sale.id,
                 'order_number': sale.order_number,
                 'status': sale.status,
+                'dian': dian_info,
                 'client': {'id': sale.client.id, 'full_name': sale.client.full_name},
                 'total_amount': str(sale.total_amount),
                 'created_at': sale.created_at.isoformat(),

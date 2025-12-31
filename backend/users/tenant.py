@@ -70,7 +70,7 @@ def ensure_tenant_for_user(user):
             'CONN_MAX_AGE': 0,
             'TIME_ZONE': settings.TIME_ZONE,
         }
-        connections.databases = settings.DATABASES
+        # connections.databases = settings.DATABASES
 
         # Ensure schema exists in the default database
         try:

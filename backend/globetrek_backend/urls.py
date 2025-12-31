@@ -28,6 +28,7 @@ urlpatterns = [
     path('clients/', include('clients.urls')),
     path('sales/', include('sales.urls')),
     path('webconfig/', include('webconfig.urls')),
+    path('einvoicing/', include('einvoicing.urls')),
     path('health/', health),
     path('', RedirectView.as_view(url='users/', permanent=True)),
 ]

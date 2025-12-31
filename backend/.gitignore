@@ -8,6 +8,10 @@ media/
 staticfiles/
 tenants/
 
+# Logs
+logs/
+*.log
+
 # Local DB files
 *.sqlite3
 

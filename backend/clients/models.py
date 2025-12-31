@@ -5,6 +5,7 @@ from users.models import Tenant
 class Client(models.Model):
     full_name = models.CharField(max_length=150)
     cedula = models.CharField(max_length=20)
+    phone = models.CharField(max_length=20, blank=True, default='')
     email = models.EmailField()
     address = models.TextField()
     tenant = models.ForeignKey(Tenant, null=True, blank=True, on_delete=models.SET_NULL)
