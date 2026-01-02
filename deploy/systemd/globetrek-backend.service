@@ -1,0 +1,25 @@
+[Unit]
+Description=Globetrek Backend
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/globetrek-backend.env
+WorkingDirectory=/srv/globetrek/backend
+ExecStart=/srv/globetrek/venv/bin/gunicorn globetrek_backend.wsgi:application -c /srv/globetrek/backend/gunicorn.conf.py
+Restart=always
+RestartSec=5
+User=globetrek
+Group=globetrek
+RuntimeDirectory=globetrek-backend
+PIDFile=/run/globetrek-backend/pid
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=30
+KillMode=mixed
+SyslogIdentifier=globetrek-backend
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

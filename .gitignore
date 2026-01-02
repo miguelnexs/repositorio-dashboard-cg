@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Env files
+backend/.env
+.env
+
+# Django
+backend/staticfiles/
+backend/media/
+backend/db.sqlite3
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (if present)
+frontend/node_modules/
+frontend/dist/
+frontend/dist-electron/
+frontend/dist-electron*/
+frontend/dist-eb-out/
+frontend/dist-eb-tmp/
+*.rar
+*.zip
+*.exe
+*.asar

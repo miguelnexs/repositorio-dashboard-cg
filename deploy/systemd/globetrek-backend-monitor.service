@@ -1,0 +1,15 @@
+[Unit]
+Description=Monitor de Globetrek Backend (healthcheck)
+After=globetrek-backend.service
+Requires=globetrek-backend.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/bash -lc 'while true; do curl -sf http://127.0.0.1:8000/health/ || systemctl restart globetrek-backend.service; sleep 15; done'
+Restart=always
+RestartSec=2
+User=globetrek
+Group=globetrek
+
+[Install]
+WantedBy=multi-user.target
