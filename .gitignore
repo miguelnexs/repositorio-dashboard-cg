@@ -29,3 +29,4 @@ frontend/dist-eb-tmp/
 *.zip
 *.exe
 *.asar
+client_secret_*.json
